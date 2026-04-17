@@ -213,6 +213,12 @@ fn register_hooks(
                 {
                     let _ = p.track_current_thread();
                 }
+                // Register with ctimer if CPU profiler fell back to ctimer mode.
+                // ctimer_register_thread() is a no-op if ctimer is not active.
+                #[cfg(feature = "cpu-profiling")]
+                {
+                    let _ = dial9_perf_self_profile::ctimer_register_thread();
+                }
             })
             .on_thread_stop(move || {
                 {
@@ -224,6 +230,8 @@ fn register_hooks(
                 {
                     p.stop_tracking_current_thread();
                 }
+                #[cfg(feature = "cpu-profiling")]
+                dial9_perf_self_profile::ctimer_unregister_thread();
             });
     }
 }

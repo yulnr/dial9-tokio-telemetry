@@ -4,10 +4,11 @@
 //! and prints any CpuSample events found.
 //!
 //! Run with:
-//!   RUSTFLAGS="--cfg tokio_unstable -C force-frame-pointers=yes" cargo run --release --features cpu-profiling --example cpu_profile_workload
+//!   cargo run --release -p dial9-tokio-telemetry --features cpu-profiling --example cpu_profile_workload
 //!
-//! You may need:
-//!   echo 2 | sudo tee /proc/sys/kernel/perf_event_paranoid
+//! Pass a base name as CLI arg to control output path:
+//!   cargo run ... --example cpu_profile_workload -- perf_trace
+//!   DIAL9_FORCE_CTIMER=1 cargo run ... --example cpu_profile_workload -- ctimer_trace
 
 use dial9_tokio_telemetry::telemetry::{
     RotatingWriter, TelemetryEvent, TracedRuntime, cpu_profile::CpuProfilingConfig,
@@ -35,22 +36,23 @@ async fn cpu_heavy_task(id: usize) {
 }
 
 fn main() {
-    // Base path without extension: writer produces cpu_profile_trace.0.bin,
-    // which the background worker can detect, symbolize, and gzip-compress.
-    let trace_base = "cpu_profile_trace.bin";
-    let segment_path = "cpu_profile_trace.0.bin";
+    let base_name = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "cpu_profile_trace".to_string());
+    let trace_base = format!("{base_name}.bin");
+    let segment_path = format!("{base_name}.0.bin");
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(4).enable_all();
 
     let writer = RotatingWriter::builder()
-        .base_path(trace_base)
+        .base_path(&trace_base)
         .max_file_size(1024 * 1024 * 20) // rotate after 20 MiB per file
         .max_total_size(1024 * 1024 * 100) // keep at most 100 MiB on disk
         .build()
         .unwrap();
     let (runtime, guard) = TracedRuntime::builder()
-        .with_trace_path(trace_base)
+        .with_trace_path(&trace_base)
         .with_task_tracking(true)
         .with_cpu_profiling(CpuProfilingConfig::default())
         .build_and_start(builder, writer)
@@ -78,8 +80,21 @@ fn main() {
 
     // Read back and report. TraceReader auto-detects gzip and parses
     // SymbolTableEntry events into callframe_symbols.
-    eprintln!("\n=== Reading trace from {segment_path} ===");
-    let reader = dial9_tokio_telemetry::analysis_unstable::TraceReader::new(segment_path).unwrap();
+    // The background worker may have gzip-compressed the segment, so try
+    // the .gz path if the original doesn't exist.
+    let read_path = if std::path::Path::new(&segment_path).exists() {
+        segment_path.to_string()
+    } else {
+        let gz = format!("{segment_path}.gz");
+        if std::path::Path::new(&gz).exists() {
+            gz
+        } else {
+            eprintln!("Trace file not found at {segment_path} or {segment_path}.gz");
+            return;
+        }
+    };
+    eprintln!("\n=== Reading trace from {read_path} ===");
+    let reader = dial9_tokio_telemetry::analysis_unstable::TraceReader::new(&read_path).unwrap();
     let events = &reader.runtime_events;
     let mut cpu_samples = 0;
     let mut polls = 0;

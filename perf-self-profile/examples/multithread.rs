@@ -2,16 +2,26 @@
 //!
 //! Build with frame pointers:
 //!   RUSTFLAGS="-C force-frame-pointers=yes" cargo run --release --example multithread
+//!
+//! Writes collapsed stacks to a file (default: `multithread.folded`).
+//! Use a CLI arg to change the output path:
+//!   cargo run --release --example multithread -- ctimer.folded
 
 use dial9_perf_self_profile::{
-    EventSource, PerfSampler, SamplerConfig, SamplingMode, resolve_symbol,
+    EventSource, PerfSampler, SamplerConfig, SamplingMode, ctimer_register_thread,
+    ctimer_unregister_thread, resolve_symbol,
 };
 use std::collections::HashMap;
+use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
 fn main() {
+    let out_path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "multithread.folded".to_string());
+
     let mut sampler = match PerfSampler::start(SamplerConfig {
         sampling: SamplingMode::FrequencyHz(999),
         event_source: EventSource::SwCpuClock,
@@ -32,7 +42,12 @@ fn main() {
             let stop = stop.clone();
             thread::Builder::new()
                 .name(format!("worker-{i}"))
-                .spawn(move || cpu_work(&stop))
+                .spawn(move || {
+                    let _ = ctimer_register_thread();
+                    let result = cpu_work(&stop);
+                    ctimer_unregister_thread();
+                    result
+                })
                 .unwrap()
         })
         .collect();
@@ -48,20 +63,25 @@ fn main() {
     sampler.disable();
     let samples = sampler.drain_samples();
     eprintln!("Collected {} samples", samples.len());
-    for sample in samples.iter().take(10) {
-        let stack = sample
+
+    // Write collapsed stacks (inferno/flamegraph format).
+    // Each line: "sym1;sym2;sym3 weight\n" (deepest frame last).
+    let mut file = std::fs::File::create(&out_path).expect("failed to create output file");
+    for sample in &samples {
+        let syms: Vec<String> = sample
             .callchain
             .iter()
-            .map(|addr| resolve_symbol(*addr))
-            .map(|sym| {
-                sym.code_info
-                    .map(|ci| format!("  {}:{}", ci.file, ci.line.unwrap_or(0)))
-                    .unwrap_or("  unknown".to_string())
+            .rev()
+            .map(|addr| {
+                let info = resolve_symbol(*addr);
+                info.name.unwrap_or_else(|| format!("{:#x}", addr))
             })
-            .collect::<Vec<_>>()
-            .join("\n");
-        println!("stack:\n{stack}");
+            .collect();
+        if !syms.is_empty() {
+            writeln!(file, "{} {}", syms.join(";"), sample.period).unwrap();
+        }
     }
+    eprintln!("Wrote collapsed stacks to {out_path}");
 
     // Show samples per thread
     let mut by_tid: HashMap<u32, usize> = HashMap::new();

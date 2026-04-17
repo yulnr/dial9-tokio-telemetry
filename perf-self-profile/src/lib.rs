@@ -52,6 +52,35 @@ pub use symbolize::{parse_proc_maps, read_proc_maps};
 pub use sys::PerfSampler;
 pub use sys::resolve_symbol;
 
+// ctimer fallback status and thread registration
+#[cfg(target_os = "linux")]
+pub use sys::is_ctimer_active;
+#[cfg(not(target_os = "linux"))]
+pub fn is_ctimer_active() -> bool {
+    false
+}
+
+/// Register the calling thread with the ctimer profiler.
+///
+/// No-op if ctimer is not active. Call from `on_thread_start` hooks.
+pub fn ctimer_register_thread() -> Result<(), std::io::Error> {
+    #[cfg(target_os = "linux")]
+    if is_ctimer_active() {
+        return crate::sys::fp_profiler::ctimer::register_thread();
+    }
+    Ok(())
+}
+
+/// Unregister the calling thread from the ctimer profiler.
+///
+/// No-op if ctimer is not active. Call from `on_thread_stop` hooks.
+pub fn ctimer_unregister_thread() {
+    #[cfg(target_os = "linux")]
+    if is_ctimer_active() {
+        crate::sys::fp_profiler::ctimer::unregister_thread();
+    }
+}
+
 // blazesym-dependent APIs
 #[cfg(target_os = "linux")]
 pub use sys::{resolve_symbol_with_maps, resolve_symbols_with_maps};
